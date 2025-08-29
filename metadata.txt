@@ -1,0 +1,26 @@
+[general]
+name=ChargeSpot
+qgisMinimumVersion=3.0
+description=QGIS Plugin to find and visualize electric vehicle charging stations using OpenChargeMap API
+version=0.1
+author=ChargeSpot Team
+email=contact@chargespot.com
+
+about=ChargeSpot is a QGIS plugin that allows users to search for electric vehicle charging stations using the OpenChargeMap API. Features include API key configuration, radius-based search, interactive map selection, POI visualization with custom icons, detailed information windows, filtering and sorting capabilities, and PDF export functionality.
+
+tracker=https://github.com/chargespot/qgis-plugin/issues
+repository=https://github.com/chargespot/qgis-plugin
+
+hasProcessingProvider=no
+changelog=
+
+tags=python,charging,electric vehicle,EV,api,openchargemap
+
+homepage=https://github.com/chargespot/qgis-plugin
+category=Web
+icon=icon.svg
+experimental=True
+deprecated=False
+
+server=False
+

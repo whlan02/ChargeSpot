@@ -1,0 +1,17 @@
+### QGIS Plugin UX Design Feedback
+
+Your proposed UX design flow is very clear and covers all the key steps from data input to result visualization. This process is logical and aligns with typical user behavior.
+
+1. **Open the plugin**
+2. **Enter API Key**
+3. **Enter Radius & Center Point (Click on map)**
+4. **API Call**
+5. **Fetch Data**
+6. **Generate a Feature Class (Layer) & Side Menu List**
+7. **Visualize POIs on the map (with different icons based on attributes)**
+8. **Click on a POI to display an Info Window**
+9. **Filter within the Side Menu List**
+10. **Sort by attributes**
+11. **Export a PDF report of selected POIs**
+
+
