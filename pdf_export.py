@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-PDF Export functionality for ChargeSpot QGIS Plugin
-"""
-
 try:
     from reportlab.lib.pagesizes import letter, A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle

@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Dependency installer for ChargeSpot QGIS Plugin
-"""
-
 import os
 import sys
 import subprocess

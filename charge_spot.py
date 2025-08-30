@@ -1,39 +1,18 @@
-# -*- coding: utf-8 -*-
-"""
-/***************************************************************************
- ChargeSpot
-                                 A QGIS plugin
- QGIS Plugin to find and visualize electric vehicle charging stations
-                              -------------------
-        begin                : 2024-12-20
-        copyright            : (C) 2024 by ChargeSpot
-        email                : contact@chargespot.com
- ***************************************************************************/
-"""
-
 import os.path
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
-from qgis.core import QgsProject, QgsMapLayer, QgsWkbTypes, QgsMessageLog, Qgis
+from qgis.core import QgsProject, QgsPointXY
 from qgis.gui import QgsMapToolEmitPoint
-# import resources  # Not needed for this plugin
+
 
 from .charge_spot_dialog import ChargeSpotDialog
 from .api_client import OpenChargeMapAPI
 
 
 class ChargeSpot:
-    """QGIS Plugin Implementation."""
 
     def __init__(self, iface):
-        """Constructor.
-
-        :param iface: An interface instance that will be passed to this class
-            which provides the hook by which you can manipulate the QGIS
-            application at run time.
-        :type iface: QgsInterface
-        """
         # Save reference to the QGIS interface
         self.iface = iface
         # initialize plugin directory
@@ -234,14 +213,33 @@ class ChargeSpot:
             if layer:
                 QgsProject.instance().addMapLayer(layer)
                 self.current_layer = layer
-                # Zoom to layer extent
-                self.iface.mapCanvas().setExtent(layer.extent())
-                self.iface.mapCanvas().refresh()
                 
+                # Get the layer extent (now in project CRS)
+                extent = layer.extent()
+                
+                # Add 20% padding
+                width = extent.width()
+                height = extent.height()
+                padding_x = width * 0.1
+                padding_y = height * 0.1
+                
+                extent.setXMinimum(extent.xMinimum() - padding_x)
+                extent.setXMaximum(extent.xMaximum() + padding_x)
+                extent.setYMinimum(extent.yMinimum() - padding_y)
+                extent.setYMaximum(extent.yMaximum() + padding_y)
+                
+                # Set the map extent and refresh
+                canvas = self.iface.mapCanvas()
+                canvas.setExtent(extent)
+                canvas.refresh()
+                
+                # Show success message
+                project_crs = QgsProject.instance().crs()
                 QMessageBox.information(
                     self.dlg,
                     "Success",
-                    f"Found and added {len(charging_stations)} charging stations to the map!"
+                    f"Found and added {len(charging_stations)} charging stations to the map!\n\n"
+                    f"Using project CRS: {project_crs.authid()}"
                 )
         else:
             QMessageBox.warning(

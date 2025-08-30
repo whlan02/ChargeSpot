@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-ChargeSpot Dialog for QGIS Plugin
-"""
-
 import os
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import pyqtSignal, Qt, QTimer
@@ -617,8 +612,11 @@ class ChargeSpotDialog(QDialog):
             for layer in layers:
                 QgsProject.instance().removeMapLayer(layer.id())
         
-        # Create vector layer
-        layer = QgsVectorLayer('Point?crs=EPSG:4326', layer_name, 'memory')
+        # Get the project CRS
+        project_crs = QgsProject.instance().crs()
+        
+        # Create vector layer using project CRS
+        layer = QgsVectorLayer(f'Point?crs={project_crs.authid()}', layer_name, 'memory')
         provider = layer.dataProvider()
         
         # Add fields
@@ -639,15 +637,32 @@ class ChargeSpotDialog(QDialog):
         provider.addAttributes(fields)
         layer.updateFields()
         
+        # Set up coordinate transformation from WGS84 to project CRS
+        wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        if project_crs != wgs84_crs:
+            from qgis.core import QgsCoordinateTransform
+            transform = QgsCoordinateTransform(wgs84_crs, project_crs, QgsProject.instance())
+        else:
+            transform = None
+        
         # Add features
         features = []
         for station in stations:
             feature = QgsFeature()
-            feature.setGeometry(
-                QgsGeometry.fromPointXY(
-                    QgsPointXY(station['longitude'], station['latitude'])
-                )
-            )
+            
+            # Create point in WGS84
+            wgs84_point = QgsPointXY(station['longitude'], station['latitude'])
+            
+            # Transform to project CRS if needed
+            if transform:
+                try:
+                    transformed_point = transform.transform(wgs84_point)
+                    feature.setGeometry(QgsGeometry.fromPointXY(transformed_point))
+                except Exception as e:
+                    # Fallback: use original coordinates
+                    feature.setGeometry(QgsGeometry.fromPointXY(wgs84_point))
+            else:
+                feature.setGeometry(QgsGeometry.fromPointXY(wgs84_point))
             
             feature.setAttributes([
                 station.get('id'),
