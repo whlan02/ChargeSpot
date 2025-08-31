@@ -1,12 +1,12 @@
 import os
 from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtCore import pyqtSignal, Qt, QTimer
+from qgis.PyQt.QtCore import pyqtSignal, Qt, QTimer, pyqtSlot
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, 
                                 QLabel, QLineEdit, QPushButton, QSpinBox, QListWidget, 
                                 QListWidgetItem, QTabWidget, QWidget, QComboBox,
                                 QCheckBox, QProgressBar, QTextEdit, QGroupBox,
                                 QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem,
-                                QHeaderView, QAbstractItemView)
+                                QHeaderView, QAbstractItemView, QSlider)
 from qgis.PyQt.QtGui import QIcon, QPixmap, QFont
 from qgis.core import (QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY, 
                       QgsField, QgsProject, QgsSymbol, QgsRendererCategory,
@@ -28,6 +28,7 @@ class ChargeSpotDialog(QDialog):
     
     map_click_requested = pyqtSignal()
     search_completed = pyqtSignal(list)
+    radius_changed = pyqtSignal(float)  # Signal for search radius changes
     
     def __init__(self, iface, api_client):
         super(ChargeSpotDialog, self).__init__()
@@ -126,12 +127,10 @@ class ChargeSpotDialog(QDialog):
         self.select_center_btn.clicked.connect(self.request_map_click)
         search_layout.addWidget(self.select_center_btn, 0, 2)
         
-        # Radius
-        search_layout.addWidget(QLabel("Search Radius (km):"), 1, 0)
-        self.radius_spin = QSpinBox()
-        self.radius_spin.setRange(1, 200)
-        self.radius_spin.setValue(10)
-        search_layout.addWidget(self.radius_spin, 1, 1)
+        # Radius info label
+        self.radius_info = QLabel("Click on map to select center point and adjust search radius")
+        self.radius_info.setStyleSheet("color: #666666; font-style: italic;")
+        search_layout.addWidget(self.radius_info, 1, 0, 1, 3)  # Span all columns
         
         # Max results
         search_layout.addWidget(QLabel("Max Results:"), 2, 0)
@@ -292,6 +291,14 @@ class ChargeSpotDialog(QDialog):
         self.clear_selection_btn.clicked.connect(self.clear_result_selection)
         self.export_pdf_btn.clicked.connect(self.export_to_pdf)
         self.results_table.itemSelectionChanged.connect(self.update_export_button)
+        
+
+        
+    def get_center_point(self):
+        """Get the current center point coordinates."""
+        if hasattr(self, 'center_x') and hasattr(self, 'center_y'):
+            return self.center_x, self.center_y
+        return None
     
     def toggle_api_key_visibility(self):
         """Toggle API key visibility."""
@@ -337,7 +344,7 @@ class ChargeSpotDialog(QDialog):
             f"You can now configure the search radius and click 'Search Charging Stations'."
         )
     
-    def search_charging_stations(self):
+    def search_charging_stations(self, radius_km=None):
         """Search for charging stations."""
         if not hasattr(self, 'center_x') or not hasattr(self, 'center_y'):
             QMessageBox.warning(
@@ -356,11 +363,14 @@ class ChargeSpotDialog(QDialog):
         # Get API key
         api_key = self.api_key_edit.text().strip() if self.api_key_edit.text().strip() else None
         
+        # Use provided radius or default to 10 km
+        search_radius = radius_km if radius_km is not None else 10
+        
         # Start async API call
         self.api_worker = self.api_client.get_async(
             self.center_y,  # latitude
             self.center_x,  # longitude
-            self.radius_spin.value(),
+            search_radius,
             api_key
         )
         

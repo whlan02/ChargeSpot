@@ -1,9 +1,119 @@
 import os.path
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QMessageBox
-from qgis.core import QgsProject, QgsPointXY
-from qgis.gui import QgsMapToolEmitPoint
+from qgis.PyQt.QtWidgets import (QAction, QMessageBox, QWidget, QHBoxLayout, 
+                               QVBoxLayout, QSlider, QLabel, QFrame, QPushButton)
+from qgis.core import (QgsProject, QgsPointXY, QgsVectorLayer, QgsMarkerSymbol, 
+                      QgsFeature, QgsGeometry, QgsCoordinateTransform, 
+                      QgsCoordinateReferenceSystem, QgsFillSymbol)
+from qgis.gui import QgsMapToolEmitPoint, QgsMapTool, QgsRubberBand
+
+class RadiusMapTool(QgsMapTool):
+    """Custom map tool with floating radius control."""
+    
+    def __init__(self, canvas, preview_callback, search_callback):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.preview_callback = preview_callback
+        self.search_callback = search_callback
+        self.dragging = False
+        self.center_point = None
+        
+        # Create floating control widget
+        self.control_widget = QFrame(self.canvas)
+        self.control_widget.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #999999;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #1f78b4;
+                color: white;
+                border: none;
+                border-radius: 2px;
+                padding: 4px 12px;
+            }
+            QPushButton:hover {
+                background-color: #2988c4;
+            }
+            QPushButton:pressed {
+                background-color: #166294;
+            }
+        """)
+        self.control_widget.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool)
+        
+        # Create main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(10, 5, 10, 5)
+        main_layout.setSpacing(5)
+        
+        # Create slider layout
+        slider_layout = QHBoxLayout()
+        slider_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.radius_label = QLabel("Search Radius:")
+        slider_layout.addWidget(self.radius_label)
+        
+        self.radius_slider = QSlider(Qt.Horizontal)
+        self.radius_slider.setRange(1, 200)
+        self.radius_slider.setValue(10)
+        self.radius_slider.setFixedWidth(150)
+        self.radius_slider.setTickPosition(QSlider.TicksBelow)
+        self.radius_slider.setTickInterval(20)
+        self.radius_slider.valueChanged.connect(self.on_radius_changed)
+        slider_layout.addWidget(self.radius_slider)
+        
+        self.value_label = QLabel("10 km")
+        slider_layout.addWidget(self.value_label)
+        
+        main_layout.addLayout(slider_layout)
+        
+        # Create button layout
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Add stretch to push button to the right
+        button_layout.addStretch()
+        
+        self.search_btn = QPushButton("Search")
+        self.search_btn.setFixedWidth(80)
+        self.search_btn.clicked.connect(self.on_search_clicked)
+        button_layout.addWidget(self.search_btn)
+        
+        main_layout.addLayout(button_layout)
+        
+        self.control_widget.setLayout(main_layout)
+        self.control_widget.hide()
+    
+    def canvasPressEvent(self, event):
+        """Handle mouse press events on the canvas."""
+        if event.button() == Qt.LeftButton:
+            self.center_point = self.toMapCoordinates(event.pos())
+            # Call the preview callback with initial point and radius
+            self.preview_callback(self.center_point, self.radius_slider.value())
+            # Show control widget near the click point
+            widget_pos = event.pos()
+            widget_pos.setY(widget_pos.y() - self.control_widget.height() - 10)
+            self.control_widget.move(self.canvas.mapToGlobal(widget_pos))
+            self.control_widget.show()
+    
+    def on_radius_changed(self, value):
+        """Handle radius slider value changes."""
+        self.value_label.setText(f"{value} km")
+        if self.center_point:
+            self.preview_callback(self.center_point, value)
+    
+    def on_search_clicked(self):
+        """Handle search button click."""
+        if self.center_point:
+            self.search_callback(self.center_point, self.radius_slider.value())
+            self.control_widget.hide()
+    
+    def deactivate(self):
+        """Clean up when the tool is deactivated."""
+        self.control_widget.hide()
+        super().deactivate()
 
 
 from .charge_spot_dialog import ChargeSpotDialog
@@ -42,6 +152,8 @@ class ChargeSpot:
         self.api_client = OpenChargeMapAPI()
         self.map_tool = None
         self.current_layer = None
+        self.center_point_layer = None
+        self.search_area_layer = None
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -152,45 +264,175 @@ class ChargeSpot:
                 self.tr(u'&ChargeSpot'),
                 action)
             self.iface.removeToolBarIcon(action)
+        
+        # Remove the center point layer if it exists
+        if self.center_point_layer:
+            QgsProject.instance().removeMapLayer(self.center_point_layer.id())
 
     def setup_map_tool(self):
         """Setup the map tool for selecting center points."""
         if self.map_tool is None:
-            self.map_tool = QgsMapToolEmitPoint(self.iface.mapCanvas())
-            self.map_tool.canvasClicked.connect(self.map_clicked)
+            self.map_tool = RadiusMapTool(
+                self.iface.mapCanvas(),
+                self.preview_radius_update,  # For live preview
+                self.handle_radius_update    # For actual search
+            )
 
-    def map_clicked(self, point, button):
-        """Handle map click events to set center point."""
+    def create_center_point_layer(self):
+        """Create a new layer for the center point if it doesn't exist."""
+        if self.center_point_layer is None:
+            # Get the project CRS
+            project_crs = QgsProject.instance().crs()
+            
+            # Create a new memory layer
+            self.center_point_layer = QgsVectorLayer(
+                f'Point?crs={project_crs.authid()}', 
+                'Search Center Point', 
+                'memory'
+            )
+            
+            # Add the layer to the project
+            QgsProject.instance().addMapLayer(self.center_point_layer)
+            
+            # Create a distinctive symbol for the center point
+            symbol = QgsMarkerSymbol.createSimple({
+                'name': 'star',
+                'color': '#FF0000',  # Red color
+                'size': '10',
+                'outline_color': '#000000',  # Black outline
+                'outline_width': '1'
+            })
+            
+            self.center_point_layer.renderer().setSymbol(symbol)
+            self.center_point_layer.triggerRepaint()
+            
+    def create_search_area_layer(self):
+        """Create a new layer for the search area if it doesn't exist."""
+        if self.search_area_layer is None:
+            # Get the project CRS
+            project_crs = QgsProject.instance().crs()
+            
+            # Create a new memory layer
+            self.search_area_layer = QgsVectorLayer(
+                f'Polygon?crs={project_crs.authid()}', 
+                'Search Area', 
+                'memory'
+            )
+            
+            # Add the layer to the project but hide it initially
+            QgsProject.instance().addMapLayer(self.search_area_layer)
+            
+            # Create a semi-transparent blue fill symbol
+            symbol = QgsFillSymbol.createSimple({
+                'color': '#1f78b440',  # Semi-transparent blue
+                'outline_color': '#1f78b4',  # Solid blue outline
+                'outline_width': '2',
+                'outline_style': 'solid'
+            })
+            
+            self.search_area_layer.renderer().setSymbol(symbol)
+            self.search_area_layer.triggerRepaint()
+            
+    def update_search_area(self, radius_km):
+        """Update the search area circle based on center point and radius."""
+        if not self.center_point_layer or self.center_point_layer.featureCount() == 0:
+            return
+            
+        # Get the center point
+        center_feature = next(self.center_point_layer.getFeatures())
+        center_point = center_feature.geometry().asPoint()
+        
+        # Create a circle with the given radius
+        # Note: We need to handle the fact that the project CRS might not be in meters
+        source_crs = self.center_point_layer.crs()
+        
+        # Create circle in a meter-based CRS (e.g., UTM) for accurate buffering
+        # We'll use UTM zone appropriate for the center point
+        from math import floor
+        zone = floor((center_point.x() + 180) / 6) + 1
+        utm_crs = QgsCoordinateReferenceSystem(f'EPSG:{32600 + zone}')  # Northern hemisphere
+        
+        # Transform center point to UTM
+        transform_to_utm = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
+        utm_center = transform_to_utm.transform(center_point)
+        
+        # Create circle in UTM coordinates
+        radius_meters = radius_km * 1000
+        # Create a point geometry
+        point_geom = QgsGeometry.fromPointXY(QgsPointXY(utm_center))
+        # Create circle by buffering the point
+        circle = point_geom.buffer(radius_meters, 36)
+        
+        # Transform circle back to source CRS
+        transform_from_utm = QgsCoordinateTransform(utm_crs, source_crs, QgsProject.instance())
+        circle.transform(transform_from_utm)
+        
+        # Create or clear the search area layer
+        if not self.search_area_layer:
+            self.create_search_area_layer()
+        else:
+            self.search_area_layer.dataProvider().truncate()
+        
+        # Add the circle to the layer
+        feature = QgsFeature()
+        feature.setGeometry(circle)
+        self.search_area_layer.dataProvider().addFeatures([feature])
+        self.search_area_layer.triggerRepaint()
+        
+        # Update the map canvas
+        self.iface.mapCanvas().refresh()
+
+    def clear_center_point_layer(self):
+        """Clear the center point layer."""
+        if self.center_point_layer:
+            self.center_point_layer.dataProvider().truncate()
+            self.center_point_layer.triggerRepaint()
+
+    def preview_radius_update(self, point, radius_km):
+        """Preview the search area without starting the search."""
+        # Create or clear the center point layer
+        if not self.center_point_layer:
+            self.create_center_point_layer()
+        else:
+            self.clear_center_point_layer()
+        
+        # Add the point to the layer
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromPointXY(point))
+        self.center_point_layer.dataProvider().addFeatures([feature])
+        self.center_point_layer.triggerRepaint()
+        
+        # Update the search area preview
+        self.update_search_area(radius_km)
+    
+    def handle_radius_update(self, point, radius_km):
+        """Handle search request from the map tool."""
+        # Transform coordinates to WGS84 if needed
+        source_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        transform = QgsCoordinateTransform(source_crs, dest_crs, QgsProject.instance())
+        
+        try:
+            transformed_point = transform.transform(point)
+            final_x, final_y = transformed_point.x(), transformed_point.y()
+        except Exception as e:
+            # Fallback: assume coordinates are already in WGS84
+            final_x, final_y = point.x(), point.y()
+        
+        # Update dialog with new coordinates and start search
         if self.dlg:
-            # Transform coordinates to WGS84 if needed
-            source_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-            from qgis.core import QgsCoordinateTransform, QgsCoordinateReferenceSystem, QgsProject
-            
-            # Transform to WGS84 (EPSG:4326) for the API
-            dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-            transform = QgsCoordinateTransform(source_crs, dest_crs, QgsProject.instance())
-            
-            try:
-                transformed_point = transform.transform(point)
-                final_x, final_y = transformed_point.x(), transformed_point.y()
-                self.dlg.set_center_point(final_x, final_y)
-            except Exception as e:
-                # Fallback: assume coordinates are already in WGS84
-                self.dlg.set_center_point(point.x(), point.y())
-            
-            # Deactivate map tool and show dialog again
-            self.iface.mapCanvas().unsetMapTool(self.map_tool)
+            self.dlg.set_center_point(final_x, final_y)
+            self.dlg.search_charging_stations(radius_km)
 
     def run(self):
         """Run method that performs all the real work"""
 
-        # Create the dialog with elements (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
-            self.first_start = False
+        # Create the dialog if it doesn't exist
+        if not self.dlg:
             self.dlg = ChargeSpotDialog(self.iface, self.api_client)
             self.dlg.map_click_requested.connect(self.activate_map_tool)
             self.dlg.search_completed.connect(self.handle_search_results)
+            self.dlg.radius_changed.connect(self.update_search_area)
 
         # show the dialog
         self.dlg.show()
