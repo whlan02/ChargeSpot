@@ -6,8 +6,8 @@ from qgis.PyQt.QtWidgets import (QAction, QMessageBox, QWidget, QHBoxLayout,
                                QApplication)
 from qgis.core import (QgsProject, QgsPointXY, QgsVectorLayer, QgsMarkerSymbol, 
                       QgsFeature, QgsGeometry, QgsCoordinateTransform, 
-                      QgsCoordinateReferenceSystem, QgsFillSymbol)
-from qgis.gui import QgsMapToolEmitPoint, QgsMapTool, QgsRubberBand
+                      QgsCoordinateReferenceSystem, QgsFillSymbol, QgsPolygon, QgsLineString, QgsPoint, QgsWkbTypes)
+from qgis.gui import QgsMapToolEmitPoint, QgsMapTool, QgsRubberBand, QgsMapToolIdentify
 
 class RadiusMapTool(QgsMapTool):
     """Custom map tool with floating radius control."""
@@ -131,6 +131,53 @@ class RadiusMapTool(QgsMapTool):
         super().deactivate()
 
 
+class ChargingStationIdentifyTool(QgsMapToolIdentify):
+    """Custom identify tool for charging station features."""
+    
+    def __init__(self, canvas, layer, info_callback):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.target_layer = layer
+        self.info_callback = info_callback
+        self.setCursor(Qt.PointingHandCursor)
+    
+    def canvasReleaseEvent(self, event):
+        """Handle mouse release events to identify features."""
+        if event.button() == Qt.LeftButton:
+            # Identify features at the clicked point
+            results = self.identify(event.x(), event.y(), [self.target_layer], QgsMapToolIdentify.TopDownStopAtFirst)
+            
+            if results:
+                # Get the first identified feature
+                result = results[0]
+                feature = result.mFeature
+                
+                # Create station data dictionary from feature attributes
+                station_data = {}
+                fields = result.mLayer.fields()
+                
+                for i, field in enumerate(fields):
+                    field_name = field.name()
+                    field_value = feature.attribute(i)
+                    station_data[field_name] = field_value
+                
+                # Convert some string fields back to lists if needed
+                if 'connection_types' in station_data and station_data['connection_types']:
+                    station_data['connection_types'] = station_data['connection_types'].split(', ')
+                if 'power_levels' in station_data and station_data['power_levels']:
+                    station_data['power_levels'] = station_data['power_levels'].split(', ')
+                
+                # Get geometry for coordinates
+                geom = feature.geometry()
+                if geom.type() == QgsWkbTypes.PointGeometry:
+                    point = geom.asPoint()
+                    station_data['longitude'] = point.x()
+                    station_data['latitude'] = point.y()
+                
+                # Call the info callback with the station data
+                self.info_callback(station_data)
+
+
 from .charge_spot_dialog import ChargeSpotDialog
 from .api_client import OpenChargeMapAPI
 
@@ -166,6 +213,7 @@ class ChargeSpot:
         self.dlg = None
         self.api_client = OpenChargeMapAPI()
         self.map_tool = None
+        self.identify_tool = None
         self.current_layer = None
         self.center_point_layer = None
         self.search_area_layer = None
@@ -349,38 +397,75 @@ class ChargeSpot:
             self.search_area_layer.triggerRepaint()
             
     def update_search_area(self, radius_km):
-        """Update the search area circle based on center point and radius."""
+        """Update the search area circle based on center point and radius.
+        Creates the circle in WGS84 (matching API behavior) then transforms to project CRS."""
         if not self.center_point_layer or self.center_point_layer.featureCount() == 0:
             return
             
-        # Get the center point
+        # Get the center point in project CRS
         center_feature = next(self.center_point_layer.getFeatures())
         center_point = center_feature.geometry().asPoint()
         
-        # Create a circle with the given radius
-        # Note: We need to handle the fact that the project CRS might not be in meters
-        source_crs = self.center_point_layer.crs()
+        project_crs = QgsProject.instance().crs()
+        wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         
-        # Create circle in a meter-based CRS (e.g., UTM) for accurate buffering
-        # We'll use UTM zone appropriate for the center point
-        from math import floor
-        zone = floor((center_point.x() + 180) / 6) + 1
-        utm_crs = QgsCoordinateReferenceSystem(f'EPSG:{32600 + zone}')  # Northern hemisphere
+        # Convert center point to WGS84 (same as API uses)
+        if project_crs.authid() != "EPSG:4326":
+            transform_to_wgs84 = QgsCoordinateTransform(project_crs, wgs84_crs, QgsProject.instance())
+            try:
+                wgs84_center = transform_to_wgs84.transform(center_point)
+            except Exception as e:
+                print(f"Transform to WGS84 failed: {e}")
+                wgs84_center = center_point  # Fallback
+        else:
+            wgs84_center = center_point
         
-        # Transform center point to UTM
-        transform_to_utm = QgsCoordinateTransform(source_crs, utm_crs, QgsProject.instance())
-        utm_center = transform_to_utm.transform(center_point)
+        # Create circle in WGS84 using geodetic buffer (matches API spherical distance)
+        wgs84_point_geom = QgsGeometry.fromPointXY(wgs84_center)
         
-        # Create circle in UTM coordinates
+        # Use geodetic buffer for accurate spherical distance (like the API)
         radius_meters = radius_km * 1000
-        # Create a point geometry
-        point_geom = QgsGeometry.fromPointXY(QgsPointXY(utm_center))
-        # Create circle by buffering the point
-        circle = point_geom.buffer(radius_meters, 36)
+        wgs84_circle = wgs84_point_geom.buffer(radius_meters / 111000.0, 36)  # Approximate degrees
         
-        # Transform circle back to source CRS
-        transform_from_utm = QgsCoordinateTransform(utm_crs, source_crs, QgsProject.instance())
-        circle.transform(transform_from_utm)
+        # For more accurate geodetic buffering, let's use a proper approach
+        # Create points around the circle using haversine-like calculation
+        import math
+        
+        # Create a more accurate circle using multiple points
+        circle_points = []
+        num_points = 72  # 5-degree intervals
+        
+        for i in range(num_points):
+            angle = 2 * math.pi * i / num_points
+            
+            # Calculate offset in degrees (rough approximation)
+            lat_offset = (radius_km / 111.0) * math.cos(angle)  # 111 km per degree latitude
+            lon_offset = (radius_km / (111.0 * math.cos(math.radians(wgs84_center.y())))) * math.sin(angle)
+            
+            point_lat = wgs84_center.y() + lat_offset
+            point_lon = wgs84_center.x() + lon_offset
+            
+            circle_points.append([point_lon, point_lat])
+        
+        # Close the polygon
+        circle_points.append(circle_points[0])
+        
+        # Create polygon from points
+        ring = QgsLineString()
+        for point in circle_points:
+            ring.addVertex(QgsPoint(point[0], point[1]))
+        
+        polygon = QgsPolygon()
+        polygon.setExteriorRing(ring)
+        wgs84_circle = QgsGeometry(polygon)
+        
+        # Transform the circle back to project CRS for display
+        if project_crs.authid() != "EPSG:4326":
+            transform_from_wgs84 = QgsCoordinateTransform(wgs84_crs, project_crs, QgsProject.instance())
+            try:
+                wgs84_circle.transform(transform_from_wgs84)
+            except Exception as e:
+                print(f"Transform from WGS84 failed: {e}")
         
         # Create or clear the search area layer
         if not self.search_area_layer:
@@ -392,7 +477,7 @@ class ChargeSpot:
         
         # Add the new circle to the layer
         feature = QgsFeature()
-        feature.setGeometry(circle)
+        feature.setGeometry(wgs84_circle)
         self.search_area_layer.dataProvider().addFeatures([feature])
         
         # Update layer extents and refresh
@@ -401,6 +486,13 @@ class ChargeSpot:
         
         # Update the map canvas
         self.iface.mapCanvas().refresh()
+        
+        # Debug information
+        print(f"Search area created (WGS84-based, matching API):")
+        print(f"  Center WGS84: {wgs84_center.x():.6f}, {wgs84_center.y():.6f}")
+        print(f"  Radius: {radius_km} km (geodetic/spherical distance)")
+        print(f"  Display CRS: {project_crs.authid()}")
+
 
     def clear_center_point_layer(self):
         """Clear the center point layer."""
@@ -426,26 +518,39 @@ class ChargeSpot:
         self.update_search_area(radius_km)
     
     def handle_radius_update(self, point, radius_km):
-        """Handle search request from the map tool."""
-        # Transform coordinates to WGS84 if needed
-        source_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-        transform = QgsCoordinateTransform(source_crs, dest_crs, QgsProject.instance())
+        """Handle search request from the map tool.
+        Uses project CRS for display, converts to WGS84 only for API calls."""
         
-        try:
-            transformed_point = transform.transform(point)
-            final_x, final_y = transformed_point.x(), transformed_point.y()
-        except Exception as e:
-            # Fallback: assume coordinates are already in WGS84
-            final_x, final_y = point.x(), point.y()
-        
-        # Update dialog with new coordinates and start search
+        # Update dialog with search request
         if self.dlg:
-            # Update the search area first
+            # Update the search area first (using point in project CRS)
             self.preview_radius_update(point, radius_km)
             
-            # Then start the search
-            self.dlg.set_center_point(final_x, final_y)
+            # Convert to WGS84 only for the API call
+            project_crs = QgsProject.instance().crs()
+            wgs84_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+            
+            # Only transform if project CRS is not already WGS84
+            if project_crs.authid() != "EPSG:4326":
+                transform = QgsCoordinateTransform(project_crs, wgs84_crs, QgsProject.instance())
+                try:
+                    wgs84_point = transform.transform(point)
+                    api_x, api_y = wgs84_point.x(), wgs84_point.y()
+                    
+                    print(f"API coordinate conversion:")
+                    print(f"  Project CRS ({project_crs.authid()}): {point.x():.6f}, {point.y():.6f}")
+                    print(f"  API WGS84: {api_x:.6f}, {api_y:.6f}")
+                    
+                except Exception as e:
+                    print(f"API coordinate transformation failed: {e}")
+                    api_x, api_y = point.x(), point.y()
+            else:
+                # Already in WGS84
+                api_x, api_y = point.x(), point.y()
+                print(f"Project already in WGS84: {api_x:.6f}, {api_y:.6f}")
+            
+            # Start the search using WGS84 coordinates for API
+            self.dlg.set_center_point(api_x, api_y, show_confirmation=False)
             self.dlg.search_charging_stations(radius_km)
             
             # Deactivate the map tool after search
@@ -484,6 +589,9 @@ class ChargeSpot:
                 QgsProject.instance().addMapLayer(layer)
                 self.current_layer = layer
                 
+                # Setup identify tool for the new layer
+                self.setup_identify_tool(layer)
+                
                 # Get the search area layer extent
                 if self.search_area_layer and self.search_area_layer.featureCount() > 0:
                     # Force update the search area layer extent
@@ -511,18 +619,44 @@ class ChargeSpot:
                     canvas.setExtent(extent)
                     canvas.refresh()
                 
-                # Show success message
+                # Show success message with identify tool instructions
                 project_crs = QgsProject.instance().crs()
                 QMessageBox.information(
                     self.dlg,
                     "Success",
                     f"Found and added {len(charging_stations)} charging stations to the map!\n\n"
-                    f"Using project CRS: {project_crs.authid()}"
+                    f"Using project CRS: {project_crs.authid()}\n\n"
+                    f"💡 Tip: Click on any charging station point to see detailed information!"
                 )
+                
+                # Automatically activate the identify tool
+                self.activate_identify_tool()
         else:
             QMessageBox.warning(
                 self.dlg,
                 "No Results",
                 "No charging stations found in the specified area."
             )
+    
+    def setup_identify_tool(self, layer):
+        """Setup the identify tool for the charging stations layer."""
+        if layer:
+            self.identify_tool = ChargingStationIdentifyTool(
+                self.iface.mapCanvas(),
+                layer,
+                self.show_station_popup
+            )
+    
+    def activate_identify_tool(self):
+        """Activate the identify tool for station information."""
+        if self.identify_tool:
+            self.iface.mapCanvas().setMapTool(self.identify_tool)
+    
+    def show_station_popup(self, station_data):
+        """Show station information in a popup dialog."""
+        if self.dlg:
+            # Use the existing StationInfoDialog from the dialog module
+            from .charge_spot_dialog import StationInfoDialog
+            info_dialog = StationInfoDialog(station_data, self.iface.mainWindow())
+            info_dialog.exec_()
 

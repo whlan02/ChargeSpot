@@ -321,7 +321,7 @@ class ChargeSpotDialog(QDialog):
             "Note: You can click anywhere on the map, with or without a base map loaded."
         )
     
-    def set_center_point(self, x, y):
+    def set_center_point(self, x, y, show_confirmation=True):
         """Set the center point from map click."""
         self.center_x = x
         self.center_y = y
@@ -334,15 +334,16 @@ class ChargeSpotDialog(QDialog):
         self.raise_()
         self.activateWindow()
         
-        # Show confirmation message
-        QMessageBox.information(
-            self,
-            "Center Point Set",
-            f"Center point successfully set to:\n"
-            f"Longitude: {x:.6f}\n"
-            f"Latitude: {y:.6f}\n\n"
-            f"You can now configure the search radius and click 'Search Charging Stations'."
-        )
+        # Show confirmation message only if requested
+        if show_confirmation:
+            QMessageBox.information(
+                self,
+                "Center Point Set",
+                f"Center point successfully set to:\n"
+                f"Longitude: {x:.6f}\n"
+                f"Latitude: {y:.6f}\n\n"
+                f"You can now configure the search radius and click 'Search Charging Stations'."
+            )
     
     def search_charging_stations(self, radius_km=None):
         """Search for charging stations."""
