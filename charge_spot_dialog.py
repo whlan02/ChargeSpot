@@ -382,6 +382,16 @@ class ChargeSpotDialog(QDialog):
         """Handle successful API response."""
         self.search_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
+        
+        if not stations:
+            self.status_label.setText("No charging stations found")
+            QMessageBox.information(
+                self,
+                "No Results",
+                "No charging stations data found in the selected area.\n\nTry increasing the search radius or selecting a different location."
+            )
+            return
+            
         self.status_label.setText(f"Found {len(stations)} charging stations")
         
         self.current_stations = stations

@@ -2,7 +2,8 @@ import os.path
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (QAction, QMessageBox, QWidget, QHBoxLayout, 
-                               QVBoxLayout, QSlider, QLabel, QFrame, QPushButton)
+                               QVBoxLayout, QSlider, QLabel, QFrame, QPushButton,
+                               QApplication)
 from qgis.core import (QgsProject, QgsPointXY, QgsVectorLayer, QgsMarkerSymbol, 
                       QgsFeature, QgsGeometry, QgsCoordinateTransform, 
                       QgsCoordinateReferenceSystem, QgsFillSymbol)
@@ -94,7 +95,19 @@ class RadiusMapTool(QgsMapTool):
             self.preview_callback(self.center_point, self.radius_slider.value())
             # Show control widget near the click point
             widget_pos = event.pos()
-            widget_pos.setY(widget_pos.y() - self.control_widget.height() - 10)
+            # Position the widget 50 pixels to the right and 30 pixels above the click point
+            widget_pos.setX(widget_pos.x() + 50)
+            widget_pos.setY(widget_pos.y() - self.control_widget.height() - 30)
+            
+            # Get the global position
+            global_pos = self.canvas.mapToGlobal(widget_pos)
+            
+            # Ensure the widget stays within the screen bounds
+            screen = QApplication.primaryScreen().geometry()
+            if global_pos.x() + self.control_widget.width() > screen.width():
+                # If it would go off the right edge, place it to the left of the click point instead
+                widget_pos.setX(event.pos().x() - self.control_widget.width() - 50)
+            
             self.control_widget.move(self.canvas.mapToGlobal(widget_pos))
             self.control_widget.show()
     
@@ -109,6 +122,8 @@ class RadiusMapTool(QgsMapTool):
         if self.center_point:
             self.search_callback(self.center_point, self.radius_slider.value())
             self.control_widget.hide()
+            # Deactivate the map tool after search
+            self.canvas.unsetMapTool(self)
     
     def deactivate(self):
         """Clean up when the tool is deactivated."""
@@ -371,12 +386,17 @@ class ChargeSpot:
         if not self.search_area_layer:
             self.create_search_area_layer()
         else:
+            # Clear all existing features
             self.search_area_layer.dataProvider().truncate()
+            self.search_area_layer.updateExtents()
         
-        # Add the circle to the layer
+        # Add the new circle to the layer
         feature = QgsFeature()
         feature.setGeometry(circle)
         self.search_area_layer.dataProvider().addFeatures([feature])
+        
+        # Update layer extents and refresh
+        self.search_area_layer.updateExtents()
         self.search_area_layer.triggerRepaint()
         
         # Update the map canvas
@@ -421,8 +441,15 @@ class ChargeSpot:
         
         # Update dialog with new coordinates and start search
         if self.dlg:
+            # Update the search area first
+            self.preview_radius_update(point, radius_km)
+            
+            # Then start the search
             self.dlg.set_center_point(final_x, final_y)
             self.dlg.search_charging_stations(radius_km)
+            
+            # Deactivate the map tool after search
+            self.iface.mapCanvas().unsetMapTool(self.map_tool)
 
     def run(self):
         """Run method that performs all the real work"""
@@ -451,29 +478,38 @@ class ChargeSpot:
     def handle_search_results(self, charging_stations):
         """Handle the search results and create a layer."""
         if charging_stations:
+            # Create and add the charging stations layer
             layer = self.dlg.create_charging_stations_layer(charging_stations)
             if layer:
                 QgsProject.instance().addMapLayer(layer)
                 self.current_layer = layer
                 
-                # Get the layer extent (now in project CRS)
-                extent = layer.extent()
-                
-                # Add 20% padding
-                width = extent.width()
-                height = extent.height()
-                padding_x = width * 0.1
-                padding_y = height * 0.1
-                
-                extent.setXMinimum(extent.xMinimum() - padding_x)
-                extent.setXMaximum(extent.xMaximum() + padding_x)
-                extent.setYMinimum(extent.yMinimum() - padding_y)
-                extent.setYMaximum(extent.yMaximum() + padding_y)
-                
-                # Set the map extent and refresh
-                canvas = self.iface.mapCanvas()
-                canvas.setExtent(extent)
-                canvas.refresh()
+                # Get the search area layer extent
+                if self.search_area_layer and self.search_area_layer.featureCount() > 0:
+                    # Force update the search area layer extent
+                    self.search_area_layer.updateExtents()
+                    
+                    # Use search area extent for zooming
+                    extent = self.search_area_layer.extent()
+                    
+                    # Debug print to check if extent is being updated
+                    print(f"Search area extent: {extent.toString()}")
+                    
+                    # Add 20% padding
+                    width = extent.width()
+                    height = extent.height()
+                    padding_x = width * 0.1
+                    padding_y = height * 0.1
+                    
+                    extent.setXMinimum(extent.xMinimum() - padding_x)
+                    extent.setXMaximum(extent.xMaximum() + padding_x)
+                    extent.setYMinimum(extent.yMinimum() - padding_y)
+                    extent.setYMaximum(extent.yMaximum() + padding_y)
+                    
+                    # Set the map extent and refresh
+                    canvas = self.iface.mapCanvas()
+                    canvas.setExtent(extent)
+                    canvas.refresh()
                 
                 # Show success message
                 project_crs = QgsProject.instance().crs()
